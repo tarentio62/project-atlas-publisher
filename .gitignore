@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Envs
+.env
+.venv/
+venv/
+
+# Logs / data exports
+*.log
+HISTORY.log
+publish_log.json
+GLOBAL_STATS.json
+PROJECT_STATS.json
+projects_inventory.json
+histo_*.txt
+
+# Work dir produced by the script (cloned / copied projects)
+github_workspace/
+
