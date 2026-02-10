@@ -15,7 +15,7 @@ Script Python pour publier et structurer une collection de projets personnels su
 1. Crée un fichier `.env` à partir de `.env.example`
 2. Variables minimales:
    - `GITHUB_USERNAME`
-   - `GITHUB_TOKEN` (PAT avec droits repo)
+   - Auth GitHub via `gh` (recommandé) ou `GITHUB_TOKEN` (PAT avec droits repo)
 3. Optionnel:
    - `GEMINI_API_KEY`
 

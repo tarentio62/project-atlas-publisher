@@ -38,8 +38,11 @@ CLIENT_PROJECT_KEYWORDS = {k.strip().lower() for k in _client_kw.split(",") if k
 STATE_FILE = os.path.join(WORKDIR, "state.json")
 
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
-GITHUB_TOKEN = _env("GITHUB_TOKEN", required=True)
+GITHUB_TOKEN = _env("GITHUB_TOKEN")  # optional if using `gh` CLI auth
 GITHUB_USERNAME = _env("GITHUB_USERNAME", required=True)
+
+# Prefer GitHub CLI (uses your already-connected account). Set to 0 to force direct API via GITHUB_TOKEN.
+USE_GH_CLI = (_env("USE_GH_CLI", "1") or "1").strip() in ("1", "true", "yes", "y", "on")
 
 # Si True: supprime le repo GitHub existant puis le recrée (⚠️ destructif)
 REPLACE_EXISTING = True
@@ -359,7 +362,31 @@ def run_gitleaks(project_path: str, report_path: str) -> tuple[bool, str]:
 # =====================================================
 
 def gh_headers():
+    if not GITHUB_TOKEN:
+        raise RuntimeError("GITHUB_TOKEN is not set (and USE_GH_CLI=0).")
     return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+
+def run_gh(args: list[str], cwd: Optional[str] = None, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["gh"] + args, cwd=cwd, check=check, capture_output=True, text=True)
+
+def gh_cli_repo_exists(repo: str) -> bool:
+    r = run_gh(["repo", "view", f"{GITHUB_USERNAME}/{repo}"], check=False)
+    return r.returncode == 0
+
+def gh_cli_delete_repo(repo: str):
+    log(f"Suppression du repo existant: {repo}", "GITHUB")
+    run_gh(["repo", "delete", f"{GITHUB_USERNAME}/{repo}", "--yes"], check=True)
+
+def gh_cli_create_repo(repo: str, private: bool, description: str | None = None):
+    args = ["repo", "create", repo, "--confirm"]
+    args.append("--private" if private else "--public")
+    if description:
+        args += ["--description", description[:160]]
+    run_gh(args, check=True)
+
+def gh_cli_set_topics(repo: str, topics: list[str]):
+    for t in [x.strip().lower() for x in topics if x.strip()]:
+        run_gh(["repo", "edit", f"{GITHUB_USERNAME}/{repo}", "--add-topic", t], check=False)
 
 def github_repo_exists(repo):
     url = f"https://api.github.com/repos/{GITHUB_USERNAME}/{repo}"
@@ -403,6 +430,22 @@ def create_or_replace_repo(repo, private=True, description: Optional[str] = None
     # s'assure que le nom est safe
     repo = slugify_repo_name(repo)
 
+    # Prefer gh CLI when available: uses existing auth, avoids embedding tokens anywhere.
+    if USE_GH_CLI:
+        if gh_cli_repo_exists(repo):
+            if REPLACE_EXISTING:
+                gh_cli_delete_repo(repo)
+                time.sleep(1)
+                gh_cli_create_repo(repo, private=private, description=description)
+            else:
+                log(f"Repo déjà existant, on garde: {repo}", "GITHUB")
+        else:
+            gh_cli_create_repo(repo, private=private, description=description)
+
+        if topics:
+            gh_cli_set_topics(repo, topics)
+        return repo
+
     if github_repo_exists(repo):
         if REPLACE_EXISTING:
             github_delete_repo(repo)
@@ -427,9 +470,8 @@ def ensure_git_repo(path):
         run_git(["init"], cwd=path, check=True)
 
 def set_remote_origin(path, repo):
-    # Prefer token in URL for non-interactive pushes.
-    # If you have `gh auth setup-git`, you can switch to https://github.com/{user}/{repo}.git
-    url = f"https://{GITHUB_USERNAME}:{GITHUB_TOKEN}@github.com/{GITHUB_USERNAME}/{repo}.git"
+    # Use plain HTTPS remote; auth is handled by Git credential helper / GitHub CLI.
+    url = f"https://github.com/{GITHUB_USERNAME}/{repo}.git"
     # si origin existe -> set-url ; sinon add
     remotes = subprocess.run(["git", "remote"], cwd=path, capture_output=True, text=True).stdout.split()
     if "origin" in remotes:
