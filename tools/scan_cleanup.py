@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
@@ -103,6 +104,7 @@ class ProjectReport:
     name: str
     path: str
     secret_findings: int
+    gitleaks_leaks: bool
     junk_paths: int
     junk_bytes: int
     public_candidate: bool
@@ -122,18 +124,56 @@ def looks_like_personal_data_project(name: str, root: str) -> bool:
     return False
 
 
+def is_client_project(project_folder_name: str, client_keywords: set[str]) -> bool:
+    n = (project_folder_name or "").lower()
+    return any(k in n for k in client_keywords)
+
+
+def run_gitleaks(gitleaks_path: str, project_path: str, report_path: str) -> tuple[bool, str]:
+    """
+    Returns (has_leaks_or_error, stderr_tail). Uses --redact=100.
+    """
+    if not gitleaks_path or not os.path.exists(gitleaks_path):
+        return True, "gitleaks not found"
+
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    p = subprocess.run(
+        [gitleaks_path, "detect", "--no-banner", "--redact", "100", "--no-git", "-s", project_path, "-f", "json", "-r", report_path],
+        cwd=project_path,
+        capture_output=True,
+        text=True,
+    )
+    stderr_tail = (p.stderr or "")[-500:]
+    if p.returncode == 1:
+        return True, stderr_tail
+    if p.returncode == 0:
+        return False, stderr_tail
+    return True, f"gitleaks error (rc={p.returncode}): {stderr_tail}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True, help="Root folder containing projects (subdirectories).")
     ap.add_argument("--quarantine", required=True, help="Where to move junk for recovery.")
     ap.add_argument("--apply", action="store_true", help="Actually move junk to quarantine.")
     ap.add_argument("--max-projects", type=int, default=0, help="Optional limit for testing.")
+    ap.add_argument("--use-gitleaks", action="store_true", help="Use gitleaks (recommended) in addition to heuristic scan.")
+    ap.add_argument("--gitleaks-path", default="", help="Path to gitleaks.exe (defaults to env GITLEAKS_PATH or tools/bin/gitleaks.exe).")
+    ap.add_argument("--client-keywords", default="", help="Comma-separated keywords; matching projects are treated as client/private.")
     ap.add_argument("--out", default="", help="Write JSON report to this path.")
     args = ap.parse_args()
 
     root = os.path.abspath(args.root)
     quarantine = os.path.abspath(args.quarantine)
     os.makedirs(quarantine, exist_ok=True)
+
+    if args.gitleaks_path:
+        gitleaks_path = os.path.abspath(args.gitleaks_path)
+    else:
+        gitleaks_path = os.getenv("GITLEAKS_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools", "bin", "gitleaks.exe"))
+
+    ck = args.client_keywords.strip() or os.getenv("CLIENT_PROJECT_KEYWORDS", "siyour,signee,mse,generali,prive,concierge,mfr,aplon")
+    client_keywords = {k.strip().lower() for k in ck.split(",") if k.strip()}
 
     projects = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
     projects.sort(key=lambda s: s.lower())
@@ -146,6 +186,7 @@ def main() -> int:
     for name in projects:
         p = os.path.join(root, name)
         secret_findings = 0
+        gitleaks_leaks = False
         junk = []
         junk_bytes = 0
         notes = []
@@ -164,6 +205,17 @@ def main() -> int:
                 fnds = scan_file_for_secrets(fp)
                 if fnds:
                     secret_findings += len(fnds)
+
+        forced_private = is_client_project(name, client_keywords)
+        if forced_private:
+            notes.append("forced_private: matches client keywords")
+
+        if args.use_gitleaks:
+            rep = os.path.join(quarantine, run_id, "_gitleaks_reports", f"{name}.json")
+            has_leaks, gl_err = run_gitleaks(gitleaks_path, p, rep)
+            gitleaks_leaks = has_leaks
+            if has_leaks:
+                notes.append(f"gitleaks: leaks or error ({gl_err})")
 
         # Junk discovery (safe rules only)
         for r, dirs, files in os.walk(p):
@@ -189,7 +241,7 @@ def main() -> int:
         if risky:
             notes.append("risk: personal-data-like naming or data/exports folders detected (conservative)")
 
-        public_candidate = (secret_findings == 0) and (not risky)
+        public_candidate = (not forced_private) and (secret_findings == 0) and (not risky) and (not gitleaks_leaks)
 
         if args.apply and junk:
             qdir = os.path.join(quarantine, run_id, name)
@@ -211,6 +263,7 @@ def main() -> int:
                 name=name,
                 path=p,
                 secret_findings=secret_findings,
+                gitleaks_leaks=gitleaks_leaks,
                 junk_paths=len(junk),
                 junk_bytes=junk_bytes,
                 public_candidate=public_candidate,
@@ -236,4 +289,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
