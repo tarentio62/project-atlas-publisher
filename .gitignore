@@ -29,3 +29,7 @@ tools/bin/
 
 # Local reports
 scan_report.json
+projects_audit.json
+cleanup_report.json
+*_audit.json
+*_report.json
