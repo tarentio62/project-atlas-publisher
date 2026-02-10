@@ -1,6 +1,6 @@
 # Project Atlas Publisher
 
-Script Python pour publier et structurer une collection de projets personnels sur GitHub (vitrine).
+Script Python pour publier et structurer une collection de projets personnels sur GitHub (portfolio).
 
 ## Ce que fait le script
 - Scanne chaque projet (structure, extensions, taille).
@@ -9,7 +9,7 @@ Script Python pour publier et structurer une collection de projets personnels su
 - Publie les projets:
   - gros/projets "standalone" => un repo par projet
   - petits projets => regroupés dans un repo "vault" (archive)
-  - un repo public "index" => ta vitrine (liens + stats)
+  - un repo public "index" => point d’entrée (liens + stats)
 
 ## Setup
 1. Crée un fichier `.env` à partir de `.env.example`
@@ -30,4 +30,3 @@ Par défaut:
 - `ARCHIVE_REPO_NAME=dev-project-vault`
 
 Tu peux les changer dans `.env`.
-

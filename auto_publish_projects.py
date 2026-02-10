@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from collections import defaultdict
+from typing import Optional
 
 import requests
 import google.generativeai as genai
@@ -16,7 +17,7 @@ import google.generativeai as genai
 # CONFIG
 # =====================================================
 
-def _env(name: str, default: str | None = None, required: bool = False) -> str | None:
+def _env(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
     v = os.getenv(name, default)
     if required and not v:
         raise RuntimeError(f"Missing required environment variable: {name}")
@@ -29,6 +30,10 @@ WORKDIR = _env("WORKDIR", "github_workspace")  # generated workspace
 # Pick a coherent branding; defaults are generic and "vitrine"-friendly.
 SHOWCASE_REPO_NAME = _env("SHOWCASE_REPO_NAME", "dev-portfolio-index")
 ARCHIVE_REPO_NAME = _env("ARCHIVE_REPO_NAME", "dev-project-vault")
+GITLEAKS_PATH = _env("GITLEAKS_PATH", os.path.join(os.path.dirname(__file__), "tools", "bin", "gitleaks.exe"))
+
+_client_kw = _env("CLIENT_PROJECT_KEYWORDS", "siyour,signee,mse,generali,prive,concierge,mfr,aplon") or ""
+CLIENT_PROJECT_KEYWORDS = {k.strip().lower() for k in _client_kw.split(",") if k.strip()}
 
 STATE_FILE = os.path.join(WORKDIR, "state.json")
 
@@ -47,6 +52,9 @@ API_RETRY = 5
 API_BACKOFF_BASE = 2
 
 MIN_HOURS_STANDALONE = 80
+
+# If True, projects recommended public by the LLM will be created as public (unless client/leaks).
+ALLOW_PUBLIC = (_env("ALLOW_PUBLIC", "1") or "1").strip() in ("1", "true", "yes", "y", "on")
 
 # =====================================================
 # PROJETS ARCHIVÉS LOCALEMENT (OPTION 3)
@@ -160,6 +168,14 @@ def safe_requests(method, url, headers=None, json_payload=None):
             log(f"Erreur réseau: {e} | retry dans {wait}s", "WARN")
             time.sleep(wait)
     raise RuntimeError("Erreur réseau persistante (GitHub API)")
+
+# =====================================================
+# CLASSIFICATION HELPERS
+# =====================================================
+
+def is_client_project(project_folder_name: str) -> bool:
+    n = (project_folder_name or "").lower()
+    return any(k in n for k in CLIENT_PROJECT_KEYWORDS)
 
 # =====================================================
 # GEMINI CALL
@@ -312,6 +328,32 @@ def scan_for_secrets(project_path: str, max_files: int = 8000, max_bytes_per_fil
                 findings.append({"kind": kind, "file": rel, "match_snippet": snippet[:160]})
     return findings
 
+def run_gitleaks(project_path: str, report_path: str) -> tuple[bool, str]:
+    """
+    Returns (has_leaks, stderr_tail).
+    Uses --redact=100 to avoid printing secrets.
+    """
+    exe = GITLEAKS_PATH
+    if not exe or not os.path.exists(exe):
+        return False, "gitleaks not found"
+
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    # --no-git: scan directory contents as-is.
+    # Exit code 1 means leaks found.
+    p = subprocess.run(
+        [exe, "detect", "--no-banner", "--redact", "100", "--no-git", "-s", project_path, "-f", "json", "-r", report_path],
+        cwd=project_path,
+        capture_output=True,
+        text=True,
+    )
+    stderr_tail = (p.stderr or "")[-500:]
+    if p.returncode == 1:
+        return True, stderr_tail
+    if p.returncode == 0:
+        return False, stderr_tail
+    # Non-standard error; treat as "cannot certify".
+    return True, f"gitleaks error (rc={p.returncode}): {stderr_tail}"
+
 # =====================================================
 # GITHUB API
 # =====================================================
@@ -331,7 +373,7 @@ def github_delete_repo(repo):
     if r.status_code not in (204, 404):
         raise RuntimeError(r.text)
 
-def github_create_repo(repo, private=True, description: str | None = None, topics: list[str] | None = None):
+def github_create_repo(repo, private=True, description: Optional[str] = None, topics: Optional[list[str]] = None):
     url = "https://api.github.com/user/repos"
     payload = {"name": repo, "private": private}
     if description:
@@ -357,7 +399,7 @@ def github_set_topics(repo: str, topics: list[str]):
     payload = {"names": [t.strip().lower() for t in topics if t.strip()]}
     safe_requests("PUT", url, headers=headers, json_payload=payload)
 
-def create_or_replace_repo(repo, private=True, description: str | None = None, topics: list[str] | None = None):
+def create_or_replace_repo(repo, private=True, description: Optional[str] = None, topics: Optional[list[str]] = None):
     # s'assure que le nom est safe
     repo = slugify_repo_name(repo)
 
@@ -520,13 +562,22 @@ def main():
             save_state(state)
             continue
 
-        analysis = analyze_with_gemini(structure)
-        analysis["project_name"] = (analysis.get("project_name") or name).strip()
+        if model is None:
+            analysis = {
+                "project_name": name.strip(),
+                "estimated_hours": 0,
+                "complexity": "LOW",
+                "project_nature": "tool",
+                "public_recommendation": "NO",
+                "reasoning": "GEMINI_API_KEY non configurée.",
+            }
+        else:
+            analysis = analyze_with_gemini(structure)
+            analysis["project_name"] = (analysis.get("project_name") or name).strip()
 
         # repo name safe
         repo_base = slugify_repo_name(analysis["project_name"])
-        if analysis.get("public_recommendation") == "YES":
-            repo_base = "public-" + repo_base
+        forced_private = is_client_project(name)
 
         # décision archive vs standalone
         hours = int(analysis.get("estimated_hours") or 0)
@@ -542,9 +593,20 @@ def main():
             write_readme_project(dst, analysis,structure)
 
             # Prevent obvious leaks before publishing
+            gitleaks_report = os.path.join(WORKDIR, "_gitleaks_reports", f"{repo_base}.json")
+            has_leaks, gl_err = run_gitleaks(dst, gitleaks_report)
+            if has_leaks:
+                log(f"Gitleaks: leak(s) or scan error for {name}. Kept private/archive. ({gl_err})", "SECURITY")
+                processed[name] = "gitleaks_blocked"
+                archive_projects.append((name, full))
+                stats.append(analysis)
+                save_state(state)
+                continue
+
+            # Extra heuristic: catch obvious tokens even if gitleaks misses it.
             findings = scan_for_secrets(dst)
             if findings:
-                log(f"Secrets détectés dans {name}: {len(findings)} finding(s). Projet mis en archive (pas de push).", "SECURITY")
+                log(f"Secrets détectés dans {name}: {len(findings)} finding(s). Kept private/archive.", "SECURITY")
                 processed[name] = "secret_detected_archive"
                 archive_projects.append((name, full))
                 stats.append(analysis)
@@ -557,7 +619,10 @@ def main():
             if analysis.get("public_recommendation") == "YES":
                 topics = sorted(set(topics + ["public"]))
 
-            repo_final = create_or_replace_repo(repo_base, private=True, description=desc, topics=topics)
+            make_public = ALLOW_PUBLIC and (analysis.get("public_recommendation") == "YES") and (not forced_private)
+            if forced_private:
+                topics = sorted(set(topics + ["client", "private"]))
+            repo_final = create_or_replace_repo(repo_base, private=(not make_public), description=desc, topics=topics)
 
             # push
             git_commit_and_push(dst, repo_final)

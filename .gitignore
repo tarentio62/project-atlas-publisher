@@ -24,3 +24,8 @@ histo_*.txt
 # Work dir produced by the script (cloned / copied projects)
 github_workspace/
 
+# Tool binaries
+tools/bin/
+
+# Local reports
+scan_report.json
