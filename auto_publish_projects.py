@@ -44,11 +44,11 @@ GITHUB_USERNAME = _env("GITHUB_USERNAME", required=True)
 # Prefer GitHub CLI (uses your already-connected account). Set to 0 to force direct API via GITHUB_TOKEN.
 USE_GH_CLI = (_env("USE_GH_CLI", "1") or "1").strip() in ("1", "true", "yes", "y", "on")
 
-# Si True: supprime le repo GitHub existant puis le recrée (⚠️ destructif)
-REPLACE_EXISTING = True
+# If True: deletes existing GitHub repo then recreates (destructive)
+REPLACE_EXISTING = (_env("REPLACE_EXISTING", "0") or "0").strip() in ("1", "true", "yes", "y", "on")
 
-# Si True: force push (écrase l'historique remote) - utile si tu remplaces
-FORCE_PUSH = True
+# If True: force push (overwrites remote history). Useful for re-import runs.
+FORCE_PUSH = (_env("FORCE_PUSH", "1") or "1").strip() in ("1", "true", "yes", "y", "on")
 
 API_TIMEOUT_SEC = 30
 API_RETRY = 5
@@ -555,7 +555,29 @@ def write_readme_project(dst, analysis, structure):
             f"- {ext.replace('.', '')}" for ext in structure["extensions"].keys()
         )
 
-    prompt = f"""
+    if model is None:
+        exts = ", ".join(sorted([e.lstrip(".") for e in (structure.get("extensions", {}) or {}).keys() if e]))
+        sample = structure.get("sample_files", []) or []
+        hint = "\n".join([f"- `{p}`" for p in sample[:10]]) if sample else "- (no sample files captured)"
+        text = f"""## Resume
+Projet importe depuis une archive personnelle.
+
+## Tech
+- Files: {structure.get('file_count', 0)}
+- Size: {structure.get('size_kb', 0)} KB
+- Extensions: {exts or 'n/a'}
+
+## Start
+Voir les fichiers du projet et lancer selon la stack (README auto minimal, sans LLM).
+
+## Files (sample)
+{hint}
+
+### English
+Imported from a personal archive. Minimal auto-generated README (no LLM configured).
+"""
+    else:
+        prompt = f"""
 Tu es un architecte logiciel senior.
 
 Rédige un README COURT et naturel pour un projet logiciel.
@@ -574,10 +596,6 @@ Nom du projet : {analysis['project_name']}
 Nature : {analysis['project_nature']}
 Complexité : {analysis['complexity']}
 """
-
-    if model is None:
-        text = ""
-    else:
         text = model.generate_content(prompt).text or ""
 
     readme = f"""# {analysis['project_name']}
@@ -589,15 +607,37 @@ Complexité : {analysis['complexity']}
         f.write(readme)
 
 
-def write_root_readme(root_dir, stats, local_only):
+def write_root_readme(root_dir, stats, local_only, public_repos):
     total_hours = sum(s["estimated_hours"] for s in stats)
     lines_local = "\n".join([f"- {p} — archive locale (environnement trop lourd / non versionné)" for p in local_only]) \
                   if local_only else "- (aucun pour l’instant)"
+
+    featured = []
+    for item in public_repos:
+        # item: dict(repo, analysis)
+        a = item.get("analysis", {}) or {}
+        featured.append(
+            (
+                int(a.get("estimated_hours") or 0),
+                item.get("repo", ""),
+                a.get("project_name") or item.get("repo", ""),
+                a.get("project_nature") or "project",
+                a.get("complexity") or "",
+            )
+        )
+    featured.sort(key=lambda x: x[0], reverse=True)
+    featured_lines = "\n".join(
+        [f"- **{name}** ({hours}h, {nature}, {cx})  \n  `https://github.com/{GITHUB_USERNAME}/{repo}`"
+         for hours, repo, name, nature, cx in featured[:30]]
+    ) if featured else "- (no public repos published by this run)"
 
     root_readme = f"""# Dev Portfolio Index
 
 Index de mes projets personnels: outils, prototypes, infra, R&D.
 Objectif: publier proprement, éviter les leaks, et garder une trace exploitable dans le temps.
+
+## Featured (public)
+{featured_lines}
 
 ## Statistiques globales
 - Projets analysés : {len(stats)}
@@ -629,6 +669,7 @@ def main():
     stats = []
     local_only = []
     archive_projects = []
+    public_repos = []
 
     for name in os.listdir(ROOT_PROJECTS_DIR):
         full = os.path.join(ROOT_PROJECTS_DIR, name)
@@ -725,6 +766,8 @@ def main():
             git_commit_and_push(dst, repo_final)
 
             processed[name] = repo_final
+            if make_public:
+                public_repos.append({"repo": repo_final, "analysis": analysis})
         else:
             archive_projects.append((name, full))
             processed[name] = "archive"
@@ -756,7 +799,7 @@ def main():
     root_dir = os.path.join(WORKDIR, SHOWCASE_REPO_NAME)
     os.makedirs(root_dir, exist_ok=True)
 
-    write_root_readme(root_dir, stats, local_only)
+    write_root_readme(root_dir, stats, local_only, public_repos)
 
     root_topics = ["portfolio", "projects", "index", "showcase", "engineering"]
     root_repo_final = create_or_replace_repo(SHOWCASE_REPO_NAME, private=False, description="Index of my personal projects (auto-published, secrets-aware).", topics=root_topics)
