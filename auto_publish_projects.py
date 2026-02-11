@@ -436,7 +436,10 @@ def gh_headers():
     return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
 
 def run_gh(args: list[str], cwd: Optional[str] = None, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["gh"] + args, cwd=cwd, check=check, capture_output=True, text=True)
+    env = os.environ.copy()
+    # Avoid an invalid GITHUB_TOKEN env var overriding the authenticated `gh` keyring session.
+    env.pop("GITHUB_TOKEN", None)
+    return subprocess.run(["gh"] + args, cwd=cwd, env=env, check=check, capture_output=True, text=True)
 
 def gh_cli_repo_exists(repo: str) -> bool:
     r = run_gh(["repo", "view", f"{GITHUB_USERNAME}/{repo}"], check=False)
