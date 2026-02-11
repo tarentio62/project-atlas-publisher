@@ -581,8 +581,19 @@ def _assert_under_workdir(path: str):
 
 def ensure_git_repo(path):
     _assert_under_workdir(path)
-    if not os.path.exists(os.path.join(path, ".git")):
-        run_git(["init"], cwd=path, check=True)
+    want = os.path.abspath(path)
+    # If this directory is already inside another git repo (e.g. the publisher repo),
+    # we must initialize a *new* repo here to avoid modifying the parent's remotes/branches.
+    p = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=path, capture_output=True, text=True)
+    top = (p.stdout or "").strip().replace("\\", "/")
+    want_norm = want.replace("\\", "/")
+    if p.returncode == 0 and top == want_norm and os.path.exists(os.path.join(path, ".git")):
+        return
+
+    # Not a git repo here (or we are inside a parent repo): start clean.
+    if os.path.exists(os.path.join(path, ".git")):
+        shutil.rmtree(os.path.join(path, ".git"), ignore_errors=True)
+    run_git(["init"], cwd=path, check=True)
 
 def set_remote_origin(path, repo):
     _assert_under_workdir(path)
