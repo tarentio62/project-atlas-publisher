@@ -63,6 +63,9 @@ PUBLIC_POLICY = (_env("PUBLIC_POLICY", "llm") or "llm").strip().lower()
 # PUBLIC_POLICY:
 # - "llm": only public when Gemini recommends it
 # - "safe": public when gitleaks is clean and not a client project (LLM optional)
+MAX_PROJECTS = int((_env("MAX_PROJECTS", "0") or "0").strip() or "0")
+AUDIT_FILE = _env("AUDIT_FILE")
+SKIP_GITLEAKS_IF_AUDIT_OK = (_env("SKIP_GITLEAKS_IF_AUDIT_OK", "1") or "1").strip() in ("1", "true", "yes", "y", "on")
 
 # =====================================================
 # PROJETS ARCHIVÉS LOCALEMENT (OPTION 3)
@@ -444,11 +447,14 @@ def gh_cli_delete_repo(repo: str):
     run_gh(["repo", "delete", f"{GITHUB_USERNAME}/{repo}", "--yes"], check=True)
 
 def gh_cli_create_repo(repo: str, private: bool, description: Optional[str] = None):
-    args = ["repo", "create", repo, "--confirm"]
+    # Non-interactive when name + visibility flag is provided.
+    args = ["repo", "create", repo]
     args.append("--private" if private else "--public")
     if description:
         args += ["--description", description[:160]]
-    run_gh(args, check=True)
+    r = run_gh(args, check=False)
+    if r.returncode != 0 and "name already exists" not in (r.stderr or "").lower():
+        raise subprocess.CalledProcessError(r.returncode, r.args, output=r.stdout, stderr=r.stderr)
 
 def gh_cli_set_topics(repo: str, topics: list[str]):
     for t in [x.strip().lower() for x in topics if x.strip()]:
@@ -697,10 +703,23 @@ def main():
     state = load_state()
     processed = state["processed"]
 
+    audit = None
+    audit_map = {}
+    if AUDIT_FILE and os.path.exists(AUDIT_FILE):
+        try:
+            audit = json.load(open(AUDIT_FILE, "r", encoding="utf-8"))
+            for p in audit.get("projects", []) or []:
+                audit_map[p.get("name")] = p
+            log(f"Audit loaded: {len(audit_map)} project(s) from {AUDIT_FILE}", "INFO")
+        except Exception as e:
+            log(f"Failed to load AUDIT_FILE, ignoring: {e}", "WARN")
+
     stats = []
     local_only = []
     archive_projects = []
     public_repos = []
+
+    processed_count = 0
 
     for name in os.listdir(ROOT_PROJECTS_DIR):
         full = os.path.join(ROOT_PROJECTS_DIR, name)
@@ -710,6 +729,13 @@ def main():
         if name in processed:
             log(f"Déjà traité : {name}", "SKIP")
             continue
+
+        if audit_map:
+            a = audit_map.get(name)
+            if a and not a.get("public_candidate", False):
+                processed[name] = "audit_blocked"
+                save_state(state)
+                continue
 
         if name in LOCAL_ONLY_PROJECTS:
             log(f"Archivé localement (option 3) : {name}", "ARCHIVE")
@@ -728,9 +754,11 @@ def main():
             continue
 
         if model is None:
+            # Heuristic estimates to rank projects even without LLM.
+            est = max(1, int(structure.get("file_count", 0) // 25 + structure.get("size_kb", 0) // 750))
             analysis = {
-                "project_name": name.strip(),
-                "estimated_hours": 0,
+                "project_name": re.sub(r"[_\\-]+", " ", name).strip().title(),
+                "estimated_hours": est,
                 "complexity": "LOW",
                 "project_nature": "tool",
                 "public_recommendation": "NO",
@@ -746,7 +774,10 @@ def main():
 
         # décision archive vs standalone
         hours = int(analysis.get("estimated_hours") or 0)
-        is_standalone = hours >= MIN_HOURS_STANDALONE or analysis.get("complexity") != "LOW"
+        if model is None:
+            is_standalone = (structure.get("file_count", 0) >= 25) or (structure.get("size_kb", 0) >= 200)
+        else:
+            is_standalone = hours >= MIN_HOURS_STANDALONE or analysis.get("complexity") != "LOW"
 
         if is_standalone:
             dst = os.path.join(WORKDIR, repo_base)
@@ -760,7 +791,10 @@ def main():
 
             # Prevent obvious leaks before publishing
             gitleaks_report = os.path.join(WORKDIR, "_gitleaks_reports", f"{repo_base}.json")
-            has_leaks, gl_err = run_gitleaks(dst, gitleaks_report)
+            if audit_map and SKIP_GITLEAKS_IF_AUDIT_OK and audit_map.get(name, {}).get("public_candidate", False):
+                has_leaks, gl_err = (False, "skipped (audit ok)")
+            else:
+                has_leaks, gl_err = run_gitleaks(dst, gitleaks_report)
             if has_leaks:
                 log(f"Gitleaks: leak(s) or scan error for {name}. Kept private/archive. ({gl_err})", "SECURITY")
                 processed[name] = "gitleaks_blocked"
@@ -805,6 +839,11 @@ def main():
 
         stats.append(analysis)
         save_state(state)
+
+        processed_count += 1
+        if MAX_PROJECTS and processed_count >= MAX_PROJECTS:
+            log(f"MAX_PROJECTS reached: {MAX_PROJECTS}", "INFO")
+            break
 
     # =================================================
     # ARCHIVE REPO
