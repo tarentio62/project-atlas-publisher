@@ -205,6 +205,8 @@ def load_state():
         s = {}
     if "processed" not in s:
         s["processed"] = {}
+    if "repo_info" not in s:
+        s["repo_info"] = {}
     return s
 
 def save_state(state):
@@ -679,24 +681,30 @@ Imported from a personal archive. README generation via LLM failed; this is a mi
         f.write(readme)
 
 
-def write_root_readme(root_dir, stats, local_only, public_repos):
+def write_root_readme(root_dir, stats, local_only, public_repos, state_repo_info):
     total_hours = sum(s["estimated_hours"] for s in stats)
     lines_local = "\n".join([f"- {p} — archive locale (environnement trop lourd / non versionné)" for p in local_only]) \
                   if local_only else "- (aucun pour l’instant)"
 
     featured = []
-    for item in public_repos:
-        # item: dict(repo, analysis)
-        a = item.get("analysis", {}) or {}
-        featured.append(
-            (
-                int(a.get("estimated_hours") or 0),
-                item.get("repo", ""),
-                a.get("project_name") or item.get("repo", ""),
-                a.get("project_nature") or "project",
-                a.get("complexity") or "",
+    # Prefer accumulated state across runs if available, fallback to this run's list.
+    if state_repo_info:
+        for repo, info in state_repo_info.items():
+            if not info.get("public"):
+                continue
+            featured.append((int(info.get("estimated_hours") or 0), repo, info.get("project_name") or repo, "project", ""))
+    else:
+        for item in public_repos:
+            a = item.get("analysis", {}) or {}
+            featured.append(
+                (
+                    int(a.get("estimated_hours") or 0),
+                    item.get("repo", ""),
+                    a.get("project_name") or item.get("repo", ""),
+                    a.get("project_nature") or "project",
+                    a.get("complexity") or "",
+                )
             )
-        )
     featured.sort(key=lambda x: x[0], reverse=True)
     featured_lines = "\n".join(
         [f"- **{name}** ({hours}h, {nature}, {cx})  \n  `https://github.com/{GITHUB_USERNAME}/{repo}`"
@@ -737,6 +745,7 @@ def main():
 
     state = load_state()
     processed = state["processed"]
+    repo_info = state.get("repo_info", {})
 
     audit = None
     audit_map = {}
@@ -867,6 +876,11 @@ def main():
             git_commit_and_push(dst, repo_final)
 
             processed[name] = repo_final
+            repo_info[repo_final] = {
+                "project_name": analysis.get("project_name") or repo_final,
+                "estimated_hours": int(analysis.get("estimated_hours") or 0),
+                "public": bool(make_public),
+            }
             if make_public:
                 public_repos.append({"repo": repo_final, "analysis": analysis})
         else:
@@ -906,7 +920,7 @@ def main():
     root_dir = os.path.join(WORKDIR, SHOWCASE_REPO_NAME)
     os.makedirs(root_dir, exist_ok=True)
 
-    write_root_readme(root_dir, stats, local_only, public_repos)
+    write_root_readme(root_dir, stats, local_only, public_repos, state.get("repo_info", {}))
 
     root_topics = ["portfolio", "projects", "index", "showcase", "engineering"]
     root_repo_final = create_or_replace_repo(SHOWCASE_REPO_NAME, private=False, description="Index of my personal projects (auto-published, secrets-aware).", topics=root_topics)
