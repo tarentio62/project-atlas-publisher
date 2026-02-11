@@ -58,6 +58,10 @@ MIN_HOURS_STANDALONE = 80
 
 # If True, projects recommended public by the LLM will be created as public (unless client/leaks).
 ALLOW_PUBLIC = (_env("ALLOW_PUBLIC", "1") or "1").strip() in ("1", "true", "yes", "y", "on")
+PUBLIC_POLICY = (_env("PUBLIC_POLICY", "llm") or "llm").strip().lower()
+# PUBLIC_POLICY:
+# - "llm": only public when Gemini recommends it
+# - "safe": public when gitleaks is clean and not a client project (LLM optional)
 
 # =====================================================
 # PROJETS ARCHIVÉS LOCALEMENT (OPTION 3)
@@ -709,7 +713,10 @@ def main():
             if analysis.get("public_recommendation") == "YES":
                 topics = sorted(set(topics + ["public"]))
 
-            make_public = ALLOW_PUBLIC and (analysis.get("public_recommendation") == "YES") and (not forced_private)
+            if PUBLIC_POLICY == "safe":
+                make_public = ALLOW_PUBLIC and (not forced_private)
+            else:
+                make_public = ALLOW_PUBLIC and (analysis.get("public_recommendation") == "YES") and (not forced_private)
             if forced_private:
                 topics = sorted(set(topics + ["client", "private"]))
             repo_final = create_or_replace_repo(repo_base, private=(not make_public), description=desc, topics=topics)
