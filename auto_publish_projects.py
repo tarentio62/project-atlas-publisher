@@ -36,6 +36,7 @@ _client_kw = _env("CLIENT_PROJECT_KEYWORDS", "siyour,signee,mse,generali,prive,c
 CLIENT_PROJECT_KEYWORDS = {k.strip().lower() for k in _client_kw.split(",") if k.strip()}
 
 STATE_FILE = os.path.join(WORKDIR, "state.json")
+RESET_STATE = (_env("RESET_STATE", "0") or "0").strip() in ("1", "true", "yes", "y", "on")
 
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
 GITHUB_TOKEN = _env("GITHUB_TOKEN")  # optional if using `gh` CLI auth
@@ -164,6 +165,8 @@ def log(msg, tag="INFO"):
 # =====================================================
 
 def load_state():
+    if RESET_STATE:
+        return {"processed": {}}
     if not os.path.exists(STATE_FILE):
         return {"processed": {}}
     try:
@@ -301,7 +304,19 @@ Retourne STRICTEMENT un JSON avec:
 Structure:
 {json.dumps(structure, indent=2, ensure_ascii=False)}
 """
-    return call_gemini_json(prompt)
+    try:
+        return call_gemini_json(prompt)
+    except Exception as e:
+        # Fallback: keep running even if Gemini is misconfigured or rate-limited.
+        log(f"Gemini analyze failed, fallback to non-LLM analysis: {str(e)[:200]}", "WARN")
+        return {
+            "project_name": "Unknown",
+            "estimated_hours": 0,
+            "complexity": "LOW",
+            "project_nature": "tool",
+            "public_recommendation": "NO",
+            "reasoning": f"Gemini error: {str(e)[:120]}",
+        }
 
 def infer_topics_from_structure(structure: dict) -> list[str]:
     exts = structure.get("extensions", {}) or {}
@@ -596,7 +611,23 @@ Nom du projet : {analysis['project_name']}
 Nature : {analysis['project_nature']}
 Complexité : {analysis['complexity']}
 """
-        text = model.generate_content(prompt).text or ""
+        try:
+            text = model.generate_content(prompt).text or ""
+        except Exception as e:
+            log(f"Gemini README failed, fallback to minimal README: {str(e)[:200]}", "WARN")
+            # Force fallback content
+            exts = ", ".join(sorted([e.lstrip('.') for e in (structure.get('extensions', {}) or {}).keys() if e]))
+            text = f"""## Resume
+Projet importe depuis une archive personnelle.
+
+## Tech
+- Files: {structure.get('file_count', 0)}
+- Size: {structure.get('size_kb', 0)} KB
+- Extensions: {exts or 'n/a'}
+
+### English
+Imported from a personal archive. README generation via LLM failed; this is a minimal fallback.
+"""
 
     readme = f"""# {analysis['project_name']}
 
