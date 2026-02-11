@@ -428,7 +428,7 @@ def gh_cli_delete_repo(repo: str):
     log(f"Suppression du repo existant: {repo}", "GITHUB")
     run_gh(["repo", "delete", f"{GITHUB_USERNAME}/{repo}", "--yes"], check=True)
 
-def gh_cli_create_repo(repo: str, private: bool, description: str | None = None):
+def gh_cli_create_repo(repo: str, private: bool, description: Optional[str] = None):
     args = ["repo", "create", repo, "--confirm"]
     args.append("--private" if private else "--public")
     if description:
