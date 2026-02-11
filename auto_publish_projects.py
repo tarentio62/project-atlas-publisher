@@ -453,7 +453,10 @@ def gh_cli_create_repo(repo: str, private: bool, description: Optional[str] = No
     if description:
         args += ["--description", description[:160]]
     r = run_gh(args, check=False)
-    if r.returncode != 0 and "name already exists" not in (r.stderr or "").lower():
+    if r.returncode != 0:
+        # Handle "already exists" (or eventual consistency) gracefully.
+        if gh_cli_repo_exists(repo) or "already exists" in (r.stderr or "").lower():
+            return
         raise subprocess.CalledProcessError(r.returncode, r.args, output=r.stdout, stderr=r.stderr)
 
 def gh_cli_set_topics(repo: str, topics: list[str]):
