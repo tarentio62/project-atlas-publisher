@@ -69,6 +69,7 @@ PUBLIC_POLICY = (_env("PUBLIC_POLICY", "llm") or "llm").strip().lower()
 MAX_PROJECTS = int((_env("MAX_PROJECTS", "0") or "0").strip() or "0")
 AUDIT_FILE = _env("AUDIT_FILE")
 SKIP_GITLEAKS_IF_AUDIT_OK = (_env("SKIP_GITLEAKS_IF_AUDIT_OK", "1") or "1").strip() in ("1", "true", "yes", "y", "on")
+ONLY_INDEX = (_env("ONLY_INDEX", "0") or "0").strip() in ("1", "true", "yes", "y", "on")
 
 # =====================================================
 # PROJETS ARCHIVÉS LOCALEMENT (OPTION 3)
@@ -497,6 +498,16 @@ def gh_cli_set_topics(repo: str, topics: list[str]):
     for t in [x.strip().lower() for x in topics if x.strip()]:
         run_gh(["repo", "edit", f"{GITHUB_USERNAME}/{repo}", "--add-topic", t], check=False)
 
+def gh_cli_list_public_repos(limit: int = 500) -> list[dict]:
+    r = run_gh(["repo", "list", GITHUB_USERNAME, "--visibility", "public", "--limit", str(limit),
+                "--json", "name,url,description,stargazerCount,updatedAt"], check=False)
+    if r.returncode != 0:
+        return []
+    try:
+        return json.loads(r.stdout or "[]")
+    except:
+        return []
+
 def github_repo_exists(repo):
     url = f"https://api.github.com/repos/{GITHUB_USERNAME}/{repo}"
     r = safe_requests("GET", url, headers=gh_headers())
@@ -733,6 +744,10 @@ def write_root_readme(root_dir, stats, local_only, public_repos, state_repo_info
          for hours, repo, name, nature, cx in featured[:30]]
     ) if featured else "- (no public repos published by this run)"
 
+    all_public = gh_cli_list_public_repos()
+    all_public.sort(key=lambda r: (r.get("stargazerCount", 0), r.get("updatedAt", "")), reverse=True)
+    all_lines = "\n".join([f"- `{r.get('name')}`: {r.get('url')}" for r in all_public]) if all_public else "- (unable to list public repos via gh)"
+
     root_readme = f"""# Dev Portfolio Index
 
 Index de mes projets personnels: outils, prototypes, infra, R&D.
@@ -740,6 +755,9 @@ Objectif: publier proprement, éviter les leaks, et garder une trace exploitable
 
 ## Featured (public)
 {featured_lines}
+
+## All Public Repositories
+{all_lines}
 
 ## Statistiques globales
 - Projets analysés : {len(stats)}
@@ -787,7 +805,7 @@ def main():
 
     processed_count = 0
 
-    for name in os.listdir(ROOT_PROJECTS_DIR):
+    for name in ([] if ONLY_INDEX else os.listdir(ROOT_PROJECTS_DIR)):
         full = os.path.join(ROOT_PROJECTS_DIR, name)
         if not os.path.isdir(full):
             continue
