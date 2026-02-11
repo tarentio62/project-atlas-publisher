@@ -89,6 +89,53 @@ IGNORED_EXT = {
 }
 
 # =====================================================
+# CLEANUP (safe, reversible only in WORKDIR copies)
+# =====================================================
+
+JUNK_DIRS = {
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".cache",
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "bin",
+    "obj",
+    "target",
+    ".venv",
+    "venv",
+    "coverage",
+}
+
+JUNK_FILE_PATTERNS = [
+    re.compile(r".*\.log$", re.IGNORECASE),
+    re.compile(r".*\.tmp$", re.IGNORECASE),
+    re.compile(r".*\.bak$", re.IGNORECASE),
+    re.compile(r".*\.swp$", re.IGNORECASE),
+    re.compile(r"^Thumbs\.db$", re.IGNORECASE),
+    re.compile(r"^\.DS_Store$", re.IGNORECASE),
+]
+
+def cleanup_tree_for_publish(path: str):
+    """
+    Deletes build/cache outputs in WORKDIR copies only (never touches ROOT_PROJECTS_DIR).
+    """
+    for root, dirs, files in os.walk(path):
+        for d in list(dirs):
+            if d in JUNK_DIRS:
+                shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                dirs.remove(d)
+        for fn in files:
+            if any(rx.match(fn) for rx in JUNK_FILE_PATTERNS):
+                try:
+                    os.remove(os.path.join(root, fn))
+                except:
+                    pass
+
+# =====================================================
 # GEMINI
 # =====================================================
 
@@ -631,6 +678,7 @@ def main():
             if os.path.exists(dst):
                 shutil.rmtree(dst, ignore_errors=True)
             shutil.copytree(full, dst, dirs_exist_ok=True)
+            cleanup_tree_for_publish(dst)
 
             write_readme_project(dst, analysis,structure)
 
@@ -685,7 +733,11 @@ def main():
     os.makedirs(archive_dir, exist_ok=True)
 
     for pname, ppath in archive_projects:
-        shutil.copytree(ppath, os.path.join(archive_dir, pname), dirs_exist_ok=True)
+        dst = os.path.join(archive_dir, pname)
+        if os.path.exists(dst):
+            shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(ppath, dst, dirs_exist_ok=True)
+        cleanup_tree_for_publish(dst)
 
     archive_repo_final = create_or_replace_repo(ARCHIVE_REPO_NAME, private=True)
     git_commit_and_push(archive_dir, archive_repo_final)
