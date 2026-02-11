@@ -17,6 +17,8 @@ import google.generativeai as genai
 # CONFIG
 # =====================================================
 
+SCRIPT_ROOT = os.path.abspath(os.path.dirname(__file__))
+
 def _env(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
     v = os.getenv(name, default)
     if required and not v:
@@ -25,6 +27,7 @@ def _env(name: str, default: Optional[str] = None, required: bool = False) -> Op
 
 ROOT_PROJECTS_DIR = _env("ROOT_PROJECTS_DIR", r"C:\Users\nicol\Documents\projets perso")  # source folder
 WORKDIR = _env("WORKDIR", "github_workspace")  # generated workspace
+WORKDIR_ABS = os.path.abspath(os.path.join(SCRIPT_ROOT, WORKDIR)) if not os.path.isabs(WORKDIR) else os.path.abspath(WORKDIR)
 
 # Naming: one public "index/showcase" repo + one private/public archive repo for smaller projects.
 # Pick a coherent branding; defaults are generic and "vitrine"-friendly.
@@ -571,11 +574,18 @@ def create_or_replace_repo(repo, private=True, description: Optional[str] = None
 def run_git(args, cwd, check=True):
     return subprocess.run(["git"] + args, cwd=cwd, check=check)
 
+def _assert_under_workdir(path: str):
+    ap = os.path.abspath(path)
+    if not ap.startswith(WORKDIR_ABS + os.sep):
+        raise RuntimeError(f"Refusing git operation outside WORKDIR. path={ap} workdir={WORKDIR_ABS}")
+
 def ensure_git_repo(path):
+    _assert_under_workdir(path)
     if not os.path.exists(os.path.join(path, ".git")):
         run_git(["init"], cwd=path, check=True)
 
 def set_remote_origin(path, repo):
+    _assert_under_workdir(path)
     # Use plain HTTPS remote; auth is handled by Git credential helper / GitHub CLI.
     url = f"https://github.com/{GITHUB_USERNAME}/{repo}.git"
     # si origin existe -> set-url ; sinon add
@@ -586,6 +596,7 @@ def set_remote_origin(path, repo):
         run_git(["remote", "add", "origin", url], cwd=path, check=True)
 
 def git_commit_and_push(path, repo):
+    _assert_under_workdir(path)
     # Always import as a clean repo, even if source contained .git/metadata.
     if os.path.exists(os.path.join(path, ".git")):
         shutil.rmtree(os.path.join(path, ".git"), ignore_errors=True)
