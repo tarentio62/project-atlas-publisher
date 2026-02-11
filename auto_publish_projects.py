@@ -106,6 +106,9 @@ JUNK_DIRS = {
     ".mypy_cache",
     ".ruff_cache",
     ".cache",
+    ".vs",
+    ".idea",
+    ".vscode",
     "node_modules",
     "dist",
     "build",
@@ -142,6 +145,29 @@ def cleanup_tree_for_publish(path: str):
                     os.remove(os.path.join(root, fn))
                 except:
                     pass
+
+    # Remove embedded Python virtualenvs even if they are not named venv/.venv.
+    for root, dirs, files in os.walk(path):
+        if "pyvenv.cfg" in files:
+            shutil.rmtree(root, ignore_errors=True)
+            # Don't descend into it
+            dirs[:] = []
+
+def strip_git_metadata(path: str):
+    """
+    Remove nested git repos copied from source projects.
+    This prevents accidental submodules and keeps a clean import history.
+    """
+    # Remove any .git / .gitmodules within the tree
+    for root, dirs, files in os.walk(path):
+        if ".git" in dirs:
+            shutil.rmtree(os.path.join(root, ".git"), ignore_errors=True)
+            dirs.remove(".git")
+        if ".gitmodules" in files:
+            try:
+                os.remove(os.path.join(root, ".gitmodules"))
+            except:
+                pass
 
 # =====================================================
 # GEMINI
@@ -558,6 +584,9 @@ def set_remote_origin(path, repo):
         run_git(["remote", "add", "origin", url], cwd=path, check=True)
 
 def git_commit_and_push(path, repo):
+    # Always import as a clean repo, even if source contained .git/metadata.
+    if os.path.exists(os.path.join(path, ".git")):
+        shutil.rmtree(os.path.join(path, ".git"), ignore_errors=True)
     ensure_git_repo(path)
     set_remote_origin(path, repo)
 
@@ -791,6 +820,7 @@ def main():
             if os.path.exists(dst):
                 shutil.rmtree(dst, ignore_errors=True)
             shutil.copytree(full, dst, dirs_exist_ok=True)
+            strip_git_metadata(dst)
             cleanup_tree_for_publish(dst)
 
             write_readme_project(dst, analysis,structure)
@@ -863,6 +893,7 @@ def main():
         if os.path.exists(dst):
             shutil.rmtree(dst, ignore_errors=True)
         shutil.copytree(ppath, dst, dirs_exist_ok=True)
+        strip_git_metadata(dst)
         cleanup_tree_for_publish(dst)
 
     archive_repo_final = create_or_replace_repo(ARCHIVE_REPO_NAME, private=True)
